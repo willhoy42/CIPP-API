@@ -12,7 +12,7 @@ function Set-CIPPIntunePolicy {
         $tenantFilter
     )
     $APINAME = 'Set-CIPPIntunePolicy'
-   
+
     $RawJSON = Get-CIPPTextReplacement -TenantFilter $tenantFilter -Text $RawJSON
 
     try {
@@ -23,6 +23,7 @@ function Set-CIPPIntunePolicy {
                 $PolicyFile = $RawJSON | ConvertFrom-Json
                 $Null = $PolicyFile | Add-Member -MemberType NoteProperty -Name 'description' -Value $description -Force
                 $null = $PolicyFile | Add-Member -MemberType NoteProperty -Name 'displayName' -Value $displayname -Force
+                $PolicyFile = $PolicyFile | Select-Object * -ExcludeProperty 'apps'
                 $RawJSON = ConvertTo-Json -InputObject $PolicyFile -Depth 20
                 $TemplateTypeURL = if ($TemplateType -eq 'windowsInformationProtectionPolicy') { 'windowsInformationProtectionPolicies' } else { "$($TemplateType)s" }
                 $CheckExististing = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/$PlatformType/$TemplateTypeURL" -tenantid $tenantFilter
@@ -65,8 +66,8 @@ function Set-CIPPIntunePolicy {
                     $ExistingID = $CheckExististing | Where-Object -Property displayName -EQ $displayname
                     $ExistingData = New-GraphGETRequest -uri "https://graph.microsoft.com/beta/$PlatformType/$TemplateTypeURL('$($ExistingID.id)')/definitionValues" -tenantid $tenantFilter
                     $DeleteJson = $RawJSON | ConvertFrom-Json -Depth 10
-                    $DeleteJson.deletedIds = @($ExistingData.id)
-                    $DeleteJson.added = @()
+                    $DeleteJson | Add-Member -MemberType NoteProperty -Name 'deletedIds' -Value @($ExistingData.id) -Force
+                    $DeleteJson | Add-Member -MemberType NoteProperty -Name 'added' -Value @() -Force
                     $DeleteJson = ConvertTo-Json -Depth 10 -InputObject $DeleteJson
                     $DeleteRequest = New-GraphPOSTRequest -uri "https://graph.microsoft.com/beta/$PlatformType/$TemplateTypeURL('$($ExistingID.id)')/updateDefinitionValues" -tenantid $tenantFilter -type POST -body $DeleteJson
                     $CreateRequest = New-GraphPOSTRequest -uri "https://graph.microsoft.com/beta/$PlatformType/$TemplateTypeURL('$($ExistingID.id)')/updateDefinitionValues" -tenantid $tenantFilter -type POST -body $RawJSON

@@ -25,14 +25,20 @@ function Push-SchedulerCIPPNotifications {
     $PartitionKey = Get-Date -UFormat '%Y%m%d'
     $Filter = "PartitionKey eq '{0}'" -f $PartitionKey
     $Currentlog = Get-CIPPAzDataTableEntity @Table -Filter $Filter | Where-Object {
-        $_.API -In $Settings -and $_.SentAsAlert -ne $true -and $_.Severity -In $severity
+        $_.API -in $Settings -and $_.sentAsAlert -ne $true -and $_.Severity -in $severity
     }
     $StandardsTable = Get-CIPPTable -tablename CippStandardsAlerts
     $CurrentStandardsLogs = Get-CIPPAzDataTableEntity @StandardsTable -Filter $Filter | Where-Object {
-        $_.SentAsAlert -ne $true
+        $_.sentAsAlert -ne $true
     }
     Write-Information "Alerts: $($Currentlog.count) found"
     Write-Information "Standards: $($CurrentStandardsLogs.count) found"
+
+    # Get the CIPP URL
+    $CippConfigTable = Get-CippTable -tablename Config
+    $CippConfig = Get-CIPPAzDataTableEntity @CippConfigTable -Filter "PartitionKey eq 'InstanceProperties' and RowKey eq 'CIPPURL'"
+    $CIPPURL = 'https://{0}' -f $CippConfig.Value
+
     #email try
     try {
         if ($Config.email -like '*@*') {
@@ -42,23 +48,52 @@ function Push-SchedulerCIPPNotifications {
                     foreach ($tenant in ($CurrentLog.Tenant | Sort-Object -Unique)) {
                         $Data = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | Where-Object -Property tenant -EQ $tenant)
                         $Subject = "$($Tenant): CIPP Alert: Alerts found starting at $((Get-Date).AddMinutes(-15))"
-                        $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table'
+                        $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table' -CIPPURL $CIPPURL
                         Send-CIPPAlert -Type 'email' -Title $Subject -HTMLContent $HTMLContent.htmlcontent -TenantFilter $tenant -APIName 'Alerts'
+                        $UpdateLogs = $CurrentLog | ForEach-Object {
+                            if ($_.PSObject.Properties.Name -contains 'sentAsAlert') {
+                                $_.sentAsAlert = $true
+                            } else {
+                                $_ | Add-Member -MemberType NoteProperty -Name sentAsAlert -Value $true -Force
+                            }
+                            $_
+                        }
+                        if ($UpdateLogs) {
+                            Add-CIPPAzDataTableEntity @Table -Entity $UpdateLogs -Force
+                        }
                     }
                 } else {
-                    $Data = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | ConvertTo-Html -frag)
+                    $Data = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity)
                     $Subject = "CIPP Alert: Alerts found starting at $((Get-Date).AddMinutes(-15))"
-                    $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table'
+                    $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table' -CIPPURL $CIPPURL
                     Send-CIPPAlert -Type 'email' -Title $Subject -HTMLContent $HTMLContent.htmlcontent -TenantFilter $tenant -APIName 'Alerts'
+                    $UpdateLogs = $CurrentLog | ForEach-Object {
+                        if ($_.PSObject.Properties.Name -contains 'sentAsAlert') {
+                            $_.sentAsAlert = $true
+                        } else {
+                            $_ | Add-Member -MemberType NoteProperty -Name sentAsAlert -Value $true -Force
+                        }
+                        $_
+                    }
+                    if ($UpdateLogs) {
+                        Add-CIPPAzDataTableEntity @Table -Entity $UpdateLogs -Force
+                    }
                 }
             }
             if ($CurrentStandardsLogs) {
                 foreach ($tenant in ($CurrentStandardsLogs.Tenant | Sort-Object -Unique)) {
                     $Data = ($CurrentStandardsLogs | Where-Object -Property tenant -EQ $tenant)
                     $Subject = "$($Tenant): Standards are out of sync for $tenant"
-                    $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'standards'
+                    $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'standards' -CIPPURL $CIPPURL
                     Send-CIPPAlert -Type 'email' -Title $Subject -HTMLContent $HTMLContent.htmlcontent -TenantFilter $tenant -APIName 'Alerts'
-                    $updateStandards = $CurrentStandardsLogs | ForEach-Object { $_.SentAsAlert = $true; $_ }
+                    $updateStandards = $CurrentStandardsLogs | ForEach-Object {
+                        if ($_.PSObject.Properties.Name -contains 'sentAsAlert') {
+                            $_.sentAsAlert = $true
+                        } else {
+                            $_ | Add-Member -MemberType NoteProperty -Name sentAsAlert -Value $true -Force
+                        }
+                        $_
+                    }
                     if ($updateStandards) { Add-CIPPAzDataTableEntity @StandardsTable -Entity $updateStandards -Force }
                 }
             }
@@ -75,16 +110,22 @@ function Push-SchedulerCIPPNotifications {
             if ($Currentlog) {
                 $JSONContent = $Currentlog | ConvertTo-Json -Compress
                 Send-CIPPAlert -Type 'webhook' -JSONContent $JSONContent -TenantFilter $Tenant -APIName 'Alerts'
-                $UpdateLogs = $CurrentLog | ForEach-Object { $_.SentAsAlert = $true; $_ }
+                $UpdateLogs = $CurrentLog | ForEach-Object { $_.sentAsAlert = $true; $_ }
                 if ($UpdateLogs) { Add-CIPPAzDataTableEntity @Table -Entity $UpdateLogs -Force }
             }
 
             if ($CurrentStandardsLogs) {
-                $JSONContent = New-CIPPAlertTemplate -Data $Data -Format 'json' -InputObject 'table'
+                $JSONContent = New-CIPPAlertTemplate -Data $Data -Format 'json' -InputObject 'table' -CIPPURL $CIPPURL
                 $CurrentStandardsLogs | ConvertTo-Json -Compress
                 Send-CIPPAlert -Type 'webhook' -JSONContent $JSONContent -TenantFilter $Tenant -APIName 'Alerts'
-                $updateStandards = $CurrentStandardsLogs | ForEach-Object { $_.SentAsAlert = $true; $_ }
-                if ($updateStandards) { Add-CIPPAzDataTableEntity @StandardsTable -Entity $updateStandards -Force }
+                $updateStandards = $CurrentStandardsLogs | ForEach-Object {
+                    if ($_.PSObject.Properties.Name -contains 'sentAsAlert') {
+                        $_.sentAsAlert = $true
+                    } else {
+                        $_ | Add-Member -MemberType NoteProperty -Name sentAsAlert -Value $true -Force
+                    }
+                    $_
+                }
             }
 
         }
@@ -96,8 +137,8 @@ function Push-SchedulerCIPPNotifications {
     if ($config.sendtoIntegration) {
         try {
             foreach ($tenant in ($CurrentLog.Tenant | Sort-Object -Unique)) {
-                $Data = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | Where-Object -Property tenant -EQ $tenant | ConvertTo-Html -frag)
-                $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table'
+                $Data = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | Where-Object -Property tenant -EQ $tenant)
+                $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'table' -CIPPURL $CIPPURL
                 $Title = "$tenant CIPP Alert: Alerts found starting at $((Get-Date).AddMinutes(-15))"
                 Send-CIPPAlert -Type 'psa' -Title $Title -HTMLContent $HTMLContent.htmlcontent -TenantFilter $tenant -APIName 'Alerts'
                 $UpdateLogs = $CurrentLog | ForEach-Object { $_.SentAsAlert = $true; $_ }
@@ -106,10 +147,16 @@ function Push-SchedulerCIPPNotifications {
             foreach ($standardsTenant in ($CurrentStandardsLogs.Tenant | Sort-Object -Unique)) {
                 $Data = ($CurrentStandardsLogs | Where-Object -Property tenant -EQ $standardsTenant)
                 $Subject = "$($standardsTenant): Standards are out of sync for $standardsTenant"
-                $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'standards'
+                $HTMLContent = New-CIPPAlertTemplate -Data $Data -Format 'html' -InputObject 'standards' -CIPPURL $CIPPURL
                 Send-CIPPAlert -Type 'psa' -Title $Subject -HTMLContent $HTMLContent.htmlcontent -TenantFilter $standardsTenant -APIName 'Alerts'
-                $updateStandards = $CurrentStandardsLogs | ForEach-Object { $_.SentAsAlert = $true; $_ }
-                if ($updateStandards) { Add-CIPPAzDataTableEntity @StandardsTable -Entity $updateStandards -Force }
+                $updateStandards = $CurrentStandardsLogs | ForEach-Object {
+                    if ($_.PSObject.Properties.Name -contains 'sentAsAlert') {
+                        $_.sentAsAlert = $true
+                    } else {
+                        $_ | Add-Member -MemberType NoteProperty -Name sentAsAlert -Value $true -Force
+                    }
+                    $_
+                }
             }
         } catch {
             Write-Information "Could not send alerts to ticketing system: $($_.Exception.message)"

@@ -1,6 +1,6 @@
 using namespace System.Net
 
-Function Invoke-ExecOffboardUser {
+function Invoke-ExecOffboardUser {
     <#
     .FUNCTIONALITY
         Entrypoint
@@ -10,7 +10,7 @@ Function Invoke-ExecOffboardUser {
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
     $AllUsers = $Request.Body.user.value
-    $TenantFilter = $request.Body.tenantFilter.value
+    $TenantFilter = $request.Body.tenantFilter.value ? $request.Body.tenantFilter.value : $request.Body.tenantFilter
     $Results = foreach ($username in $AllUsers) {
         try {
             $APIName = 'ExecOffboardUser'
@@ -30,7 +30,7 @@ Function Invoke-ExecOffboardUser {
                         options      = $Request.Body
                         RunScheduled = $true
                     }
-                    ScheduledTime = $Request.Body.scheduled.date
+                    ScheduledTime = $Request.Body.Scheduled.date
                     PostExecution = @{
                         Webhook = [bool]$Request.Body.PostExecution.webhook
                         Email   = [bool]$Request.Body.PostExecution.email
