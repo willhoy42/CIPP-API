@@ -106,7 +106,7 @@ function Test-CIPPAccessTenant {
         try {
             $null = New-ExoRequest -tenantid $Tenant.customerId -cmdlet 'Get-OrganizationConfig' -ErrorAction Stop
 
-            $OrgManagementRoles = New-ExoRequest -tenantid $Tenant.customerId -cmdlet 'Get-ManagementRoleAssignment' -cmdParams @{ RoleAssignee = 'Organization Management'; Delegating = $false } | Select-Object -Property Role, Guid
+            $OrgManagementRoles = New-ExoRequest -tenantid $Tenant.customerId -cmdlet 'Get-ManagementRoleAssignment' -cmdParams @{ Delegating = $false } | Where-Object { $_.RoleAssigneeName -eq 'Organization Management' } | Select-Object -Property Role, Guid
             Write-Information "Found $($OrgManagementRoles.Count) Organization Management roles in Exchange"
             $Results.OrgManagementRoles = $OrgManagementRoles
 
@@ -114,8 +114,8 @@ function Test-CIPPAccessTenant {
             Write-Information "Found $($RoleDefinitions.Count) Exchange role definitions"
 
             $BasePath = Get-Module -Name 'CIPPCore' | Select-Object -ExpandProperty ModuleBase
-            $AllOrgManagementRoles = Get-Content -Path "$BasePath\Public\OrganizationManagementRoles.json" -ErrorAction Stop | ConvertFrom-Json
-            Write-Information "Loaded all Organization Management roles from $BasePath\Public\OrganizationManagementRoles.json"
+            $AllOrgManagementRoles = Get-Content -Path "$BasePath\lib\data\OrganizationManagementRoles.json" -ErrorAction Stop | ConvertFrom-Json
+            Write-Information "Loaded all Organization Management roles from $BasePath\lib\data\OrganizationManagementRoles.json"
 
             $AvailableRoles = $RoleDefinitions | Where-Object -Property displayName -In $AllOrgManagementRoles | Select-Object -Property displayName, id, description
             Write-Information "Found $($AvailableRoles.Count) available Organization Management roles in Exchange"

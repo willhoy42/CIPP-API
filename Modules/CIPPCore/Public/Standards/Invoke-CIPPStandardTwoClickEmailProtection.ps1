@@ -13,6 +13,8 @@ function Invoke-CIPPStandardTwoClickEmailProtection {
         CAT
             Exchange Standards
         TAG
+        EXECUTIVETEXT
+            Requires employees to click twice before viewing encrypted or sensitive emails, preventing accidental exposure of confidential information when screens might be visible to others. This privacy protection helps prevent shoulder surfing and ensures employees are intentional about viewing sensitive content.
         ADDEDCOMPONENT
             {"type":"autoComplete","multiple":false,"creatable":false,"label":"Select value","name":"standards.TwoClickEmailProtection.state","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"}]}
         IMPACT
@@ -29,7 +31,12 @@ function Invoke-CIPPStandardTwoClickEmailProtection {
     #>
 
     param($Tenant, $Settings)
-    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'TwoClickEmailProtection'
+    $TestResult = Test-CIPPStandardLicense -StandardName 'TwoClickEmailProtection' -TenantFilter $Tenant -RequiredCapabilities @('EXCHANGE_S_STANDARD', 'EXCHANGE_S_ENTERPRISE', 'EXCHANGE_S_STANDARD_GOV', 'EXCHANGE_S_ENTERPRISE_GOV', 'EXCHANGE_LITE') #No Foundation because that does not allow powershell access
+
+    if ($TestResult -eq $false) {
+        Write-Host "We're exiting as the correct license is not present for this standard."
+        return $true
+    } #we're done.
 
     # Get state value using null-coalescing operator
     $State = $Settings.state.value ?? $Settings.state
@@ -37,7 +44,7 @@ function Invoke-CIPPStandardTwoClickEmailProtection {
     # Input validation
     if ([string]::IsNullOrWhiteSpace($State)) {
         Write-LogMessage -API 'Standards' -tenant $Tenant -message 'TwoClickEmailProtection: Invalid state parameter set' -sev Error
-        Return
+        return
     }
 
     try {
@@ -45,7 +52,7 @@ function Invoke-CIPPStandardTwoClickEmailProtection {
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'Standards' -tenant $Tenant -message "Could not get current two-click email protection state. Error: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
-        Return
+        return
     }
 
     $WantedState = $State -eq 'enabled' ? $true : $false
@@ -78,7 +85,13 @@ function Invoke-CIPPStandardTwoClickEmailProtection {
     }
 
     if ($Settings.report -eq $true) {
-        Set-CIPPStandardsCompareField -FieldName 'standards.TwoClickEmailProtection' -FieldValue $StateIsCorrect -Tenant $Tenant
+        $CurrentValue = @{
+            TwoClickMailPreviewEnabled = $CurrentState
+        }
+        $ExpectedValue = @{
+            TwoClickMailPreviewEnabled = $WantedState
+        }
+        Set-CIPPStandardsCompareField -FieldName 'standards.TwoClickEmailProtection' -CurrentValue $CurrentValue -ExpectedValue $ExpectedValue -Tenant $Tenant
         Add-CIPPBPAField -FieldName 'TwoClickEmailProtection' -FieldValue $StateIsCorrect -StoreAs bool -Tenant $Tenant
     }
 }
