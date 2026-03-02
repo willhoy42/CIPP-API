@@ -6,7 +6,7 @@ function Get-CIPPMFAState {
         $Headers
     )
     #$PerUserMFAState = Get-CIPPPerUserMFA -TenantFilter $TenantFilter -AllUsers $true
-    $users = foreach ($user in (New-GraphGetRequest -uri 'https://graph.microsoft.com/v1.0/users?$top=999&$select=id,UserPrincipalName,DisplayName,accountEnabled,assignedLicenses,perUserMfaState' -tenantid $TenantFilter)) {
+    $users = foreach ($user in (New-GraphGetRequest -uri 'https://graph.microsoft.com/v1.0/users?$top=999&$select=id,UserPrincipalName,DisplayName,accountEnabled,assignedLicenses,perUserMfaState,userType' -tenantid $TenantFilter)) {
         [PSCustomObject]@{
             UserPrincipalName = $user.UserPrincipalName
             isLicensed        = [boolean]$user.assignedLicenses.Count
@@ -14,37 +14,51 @@ function Get-CIPPMFAState {
             DisplayName       = $user.DisplayName
             ObjectId          = $user.id
             perUserMfaState   = $user.perUserMfaState
+            UserType          = $user.userType
         }
     }
 
     $Errors = [System.Collections.Generic.List[object]]::new()
+    $SecureDefaultsState = $null
+    $CASuccess = $false
+    $CAError = $null
+    $PolicyTable = @{}
+    $AllUserPolicies = [System.Collections.Generic.List[object]]::new()
+    $GuestUserPolicies = [System.Collections.Generic.List[object]]::new()
+    $UserGroupMembership = @{}
+    $UserExcludeGroupMembership = @{}
+    $GroupNameLookup = @{}
+    $MFAIndex = @{}
+
     try {
         $SecureDefaultsState = (New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/policies/identitySecurityDefaultsEnforcementPolicy' -tenantid $TenantFilter ).IsEnabled
     } catch {
         Write-Host "Secure Defaults not available: $($_.Exception.Message)"
         $Errors.Add(@{Step = 'SecureDefaults'; Message = $_.Exception.Message })
+        $SecureDefaultsState = $null
     }
     $CAState = [System.Collections.Generic.List[object]]::new()
 
     try {
-        $MFARegistration = (New-GraphGetRequest -uri "https://graph.microsoft.com/beta/reports/authenticationMethods/userRegistrationDetails?$top=999&$select=userPrincipalName,isMfaRegistered,isMfaCapable,methodsRegistered" -tenantid $TenantFilter -asapp $true)
-        $MFAIndex = @{}
+        $MFARegistration = (New-GraphGetRequest -uri "https://graph.microsoft.com/beta/reports/authenticationMethods/userRegistrationDetails?`$top=999&`$select=userPrincipalName,isMfaRegistered,isMfaCapable,methodsRegistered" -tenantid $TenantFilter -asapp $true)
         foreach ($MFAEntry in $MFARegistration) {
-            $MFAIndex[$MFAEntry.userPrincipalName] = $MFAEntry
+            if ($null -ne $MFAEntry.userPrincipalName) {
+                $MFAIndex[$MFAEntry.userPrincipalName] = $MFAEntry
+            }
         }
     } catch {
         $CAState.Add('Not Licensed for Conditional Access') | Out-Null
         $MFARegistration = $null
+        $CAError = 'MFA registration not available - licensing required for Conditional Access reporting'
         if ($_.Exception.Message -ne "Tenant is not a B2C tenant and doesn't have premium licenses") {
             $Errors.Add(@{Step = 'MFARegistration'; Message = $_.Exception.Message })
         }
         Write-Host "User registration details not available: $($_.Exception.Message)"
-        $MFAIndex = @{}
     }
 
     if ($null -ne $MFARegistration) {
-        $CASuccess = $true
         try {
+            $CASuccess = $true
             $CAPolicies = (New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/identity/conditionalAccess/policies?$top=999&$filter=state eq ''enabled''&$select=id,displayName,state,grantControls,conditions' -tenantid $TenantFilter -ErrorAction Stop -AsApp $true)
             $PolicyTable = @{}
             $AllUserPolicies = [System.Collections.Generic.List[object]]::new()
@@ -64,7 +78,7 @@ function Get-CIPPMFAState {
 
                 if ($RequiresMFA) {
                     # Handle user assignments
-                    if ($Policy.conditions.users.includeUsers -ne $null) {
+                    if ($null -ne $Policy.conditions.users.includeUsers) {
                         # Check if "All" is included
                         if ($Policy.conditions.users.includeUsers -contains 'All') {
                             $AllUserPolicies.Add($Policy)
@@ -78,15 +92,20 @@ function Get-CIPPMFAState {
                         }
                     }
 
+                    # Handle guest/external user assignments
+                    if ($null -ne $Policy.conditions.users.includeGuestsOrExternalUsers) {
+                        $GuestUserPolicies.Add($Policy)
+                    }
+
                     # Collect groups to resolve
-                    if ($Policy.conditions.users.includeGroups -ne $null -and $Policy.conditions.users.includeGroups.Count -gt 0) {
+                    if ($null -ne $Policy.conditions.users.includeGroups -and $Policy.conditions.users.includeGroups.Count -gt 0) {
                         foreach ($GroupId in $Policy.conditions.users.includeGroups) {
                             [void]$GroupsToResolve.Add($GroupId)
                         }
                     }
 
                     # Collect exclude groups to resolve
-                    if ($Policy.conditions.users.excludeGroups -ne $null -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
+                    if ($null -ne $Policy.conditions.users.excludeGroups -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
                         foreach ($GroupId in $Policy.conditions.users.excludeGroups) {
                             [void]$ExcludeGroupsToResolve.Add($GroupId)
                         }
@@ -169,7 +188,7 @@ function Get-CIPPMFAState {
                 }
 
                 # Now add policies to users based on group membership
-                foreach ($Policy in $CAPolicies | Where-Object { $_.conditions.users.includeGroups -ne $null -and $_.conditions.users.includeGroups.Count -gt 0 }) {
+                foreach ($Policy in $CAPolicies | Where-Object { $null -ne $_.conditions.users.includeGroups -and $_.conditions.users.includeGroups.Count -gt 0 }) {
                     # Check if this policy requires MFA
                     $RequiresMFA = $false
                     if ($Policy.grantControls.builtInControls -contains 'mfa') {
@@ -223,6 +242,65 @@ function Get-CIPPMFAState {
     $GraphRequest = $Users | ForEach-Object {
         $UserCAState = [System.Collections.Generic.List[object]]::new()
 
+        # Check if user is a guest and add guest-targeting policies
+        if ($_.UserType -eq 'Guest') {
+            foreach ($Policy in $GuestUserPolicies) {
+                $GuestConfig = $Policy.conditions.users.includeGuestsOrExternalUsers
+                $IsGuestIncluded = $false
+
+                if ($null -ne $GuestConfig -and $null -ne $GuestConfig.guestOrExternalUserTypes) {
+                    $GuestTypes = $GuestConfig.guestOrExternalUserTypes -split ','
+                    # Check if policy includes all guests or specifically internal guests
+                    if ($GuestTypes -contains 'internalGuest') {
+                        $IsGuestIncluded = $true
+                    }
+                }
+
+                # Check if guests are explicitly excluded from the policy
+                $ExcludeGuestConfig = $Policy.conditions.users.excludeGuestsOrExternalUsers
+                if ($null -ne $ExcludeGuestConfig -and $null -ne $ExcludeGuestConfig.guestOrExternalUserTypes) {
+                    $ExcludeGuestTypes = $ExcludeGuestConfig.guestOrExternalUserTypes -split ','
+                    if ($ExcludeGuestTypes -contains 'internalGuest') {
+                        $IsGuestIncluded = $false
+                    }
+                }
+
+                if ($IsGuestIncluded) {
+                    # Check if user is excluded directly or via group
+                    $IsExcluded = $Policy.conditions.users.excludeUsers -contains $_.ObjectId
+                    $ExcludedViaGroup = $null
+
+                    # Check exclude groups
+                    if (-not $IsExcluded -and $null -ne $Policy.conditions.users.excludeGroups -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
+                        if ($UserExcludeGroupMembership.ContainsKey($_.ObjectId)) {
+                            foreach ($ExcludeGroupId in $Policy.conditions.users.excludeGroups) {
+                                if ($UserExcludeGroupMembership[$_.ObjectId].Contains($ExcludeGroupId)) {
+                                    $IsExcluded = $true
+                                    $ExcludedViaGroup = if ($GroupNameLookup.ContainsKey($ExcludeGroupId)) {
+                                        $GroupNameLookup[$ExcludeGroupId]
+                                    } else {
+                                        $ExcludeGroupId
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    $PolicyObj = [PSCustomObject]@{
+                        DisplayName  = $Policy.displayName
+                        UserIncluded = -not $IsExcluded
+                        AllApps      = ($Policy.conditions.applications.includeApplications -contains 'All')
+                        PolicyState  = $Policy.state
+                    }
+                    if ($ExcludedViaGroup) {
+                        $PolicyObj | Add-Member -NotePropertyName 'ExcludedViaGroup' -NotePropertyValue $ExcludedViaGroup
+                    }
+                    $UserCAState.Add($PolicyObj)
+                }
+            }
+        }
+
         # Add policies that apply to this specific user
         if ($PolicyTable.ContainsKey($_.ObjectId)) {
             foreach ($Policy in $PolicyTable[$_.ObjectId]) {
@@ -231,7 +309,7 @@ function Get-CIPPMFAState {
                 $ExcludedViaGroup = $null
 
                 # Check exclude groups
-                if (-not $IsExcluded -and $Policy.conditions.users.excludeGroups -ne $null -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
+                if (-not $IsExcluded -and $null -ne $Policy.conditions.users.excludeGroups -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
                     if ($UserExcludeGroupMembership.ContainsKey($_.ObjectId)) {
                         foreach ($ExcludeGroupId in $Policy.conditions.users.excludeGroups) {
                             if ($UserExcludeGroupMembership[$_.ObjectId].Contains($ExcludeGroupId)) {
@@ -266,8 +344,19 @@ function Get-CIPPMFAState {
             $IsExcluded = $Policy.conditions.users.excludeUsers -contains $_.ObjectId
             $ExcludedViaGroup = $null
 
+            # Check if guests are excluded from this "All users" policy
+            if (-not $IsExcluded -and $_.UserType -eq 'Guest') {
+                $ExcludeGuestConfig = $Policy.conditions.users.excludeGuestsOrExternalUsers
+                if ($null -ne $ExcludeGuestConfig -and $null -ne $ExcludeGuestConfig.guestOrExternalUserTypes) {
+                    $ExcludeGuestTypes = $ExcludeGuestConfig.guestOrExternalUserTypes -split ','
+                    if ($ExcludeGuestTypes -contains 'internalGuest') {
+                        $IsExcluded = $true
+                    }
+                }
+            }
+
             # Check exclude groups
-            if (-not $IsExcluded -and $Policy.conditions.users.excludeGroups -ne $null -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
+            if (-not $IsExcluded -and $null -ne $Policy.conditions.users.excludeGroups -and $Policy.conditions.users.excludeGroups.Count -gt 0) {
                 if ($UserExcludeGroupMembership.ContainsKey($_.ObjectId)) {
                     foreach ($ExcludeGroupId in $Policy.conditions.users.excludeGroups) {
                         if ($UserExcludeGroupMembership[$_.ObjectId].Contains($ExcludeGroupId)) {
@@ -315,11 +404,7 @@ function Get-CIPPMFAState {
 
         $PerUser = $_.PerUserMFAState
 
-        $MFARegUser = if ($null -eq ($MFAIndex[$_.UserPrincipalName])) {
-            $false
-        } else {
-            $MFAIndex[$_.UserPrincipalName]
-        }
+        $MFARegUser = $MFAIndex[$_.UserPrincipalName]
 
         [PSCustomObject]@{
             Tenant          = $TenantFilter
@@ -329,13 +414,14 @@ function Get-CIPPMFAState {
             AccountEnabled  = $_.accountEnabled
             PerUser         = $PerUser
             isLicensed      = $_.isLicensed
-            MFARegistration = if ($MFARegUser) { $MFARegUser.isMfaRegistered } else { $false }
-            MFACapable      = if ($MFARegUser) { $MFARegUser.isMfaCapable } else { $false }
-            MFAMethods      = if ($MFARegUser) { $MFARegUser.methodsRegistered } else { @() }
+            MFARegistration = if ($null -ne $MFARegUser) { [bool]$MFARegUser.isMfaRegistered } else { $null }
+            MFACapable      = if ($null -ne $MFARegUser) { [bool]$MFARegUser.isMfaCapable } else { $null }
+            MFAMethods      = if ($null -ne $MFARegUser) { @($MFARegUser.methodsRegistered) } else { @() }
             CoveredByCA     = $CoveredByCA
-            CAPolicies      = $UserCAState
+            CAPolicies      = @($UserCAState)
             CoveredBySD     = $SecureDefaultsState
             IsAdmin         = $IsAdmin
+            UserType        = $_.UserType
             RowKey          = [string]($_.UserPrincipalName).replace('#', '')
             PartitionKey    = 'users'
         }

@@ -29,7 +29,13 @@ function Compare-CIPPIntuneObject {
             'qualityUpdatesPauseStartDate',
             'featureUpdatesPauseStartDate'
             'wslDistributions',
-            'lastSuccessfulSyncDateTime'
+            'lastSuccessfulSyncDateTime',
+            'tenantFilter',
+            'agents',
+            'isSynced'
+            'locationInfo',
+            'templateId',
+            'source'
         )
 
         $excludeProps = $defaultExcludeProperties + $ExcludeProperties
@@ -42,6 +48,38 @@ function Compare-CIPPIntuneObject {
             return ($PropertyName -like '*@OData*' -or
                 $PropertyName -like '#microsoft.graph*' -or
                 $excludeProps -contains $PropertyName)
+        }
+
+        function ShouldCompareAsUnorderedSet {
+            param (
+                [string]$PropertyPath
+            )
+            # Properties that should be compared as sets (order doesn't matter)
+            $unorderedSetPatterns = @(
+                'includeGroups',
+                'excludeGroups',
+                'includeUsers',
+                'excludeUsers',
+                'includeApplications',
+                'excludeApplications',
+                'includeRoles',
+                'excludeRoles',
+                'includePlatforms',
+                'excludePlatforms',
+                'includeLocations',
+                'excludeLocations',
+                'includeDevices',
+                'excludeDevices',
+                'includeGuestOrExternalUserTypes',
+                'excludeGuestOrExternalUserTypes'
+            )
+
+            foreach ($pattern in $unorderedSetPatterns) {
+                if ($PropertyPath -match "\.$pattern(\.\d+)?$" -or $PropertyPath -eq $pattern) {
+                    return $true
+                }
+            }
+            return $false
         }
 
         function Compare-ObjectsRecursively {
@@ -57,13 +95,6 @@ function Compare-CIPPIntuneObject {
                 [int]$Depth = 0,
                 [int]$MaxDepth = 20
             )
-
-            # Check for arrays at the start of every recursive call - this catches arrays at any nesting level
-            $isObj1Array = $Object1 -is [Array] -or $Object1 -is [System.Collections.IList]
-            $isObj2Array = $Object2 -is [Array] -or $Object2 -is [System.Collections.IList]
-            if ($isObj1Array -or $isObj2Array) {
-                return
-            }
 
             if ($Depth -ge $MaxDepth) {
                 $result.Add([PSCustomObject]@{
@@ -97,7 +128,7 @@ function Compare-CIPPIntuneObject {
             }
 
             # Short-circuit recursion for primitive types
-            $primitiveTypes = @([double], [decimal], [datetime], [timespan], [guid] )
+            $primitiveTypes = @([string], [int], [long], [bool], [double], [decimal], [datetime], [timespan], [guid] )
             foreach ($type in $primitiveTypes) {
                 if ($Object1 -is $type -and $Object2 -is $type) {
                     if ($Object1 -ne $Object2) {
@@ -138,25 +169,65 @@ function Compare-CIPPIntuneObject {
                     }
                 }
             } elseif ($Object1 -is [Array] -or $Object1 -is [System.Collections.IList]) {
-                $maxLength = [Math]::Max($Object1.Count, $Object2.Count)
-
-                for ($i = 0; $i -lt $maxLength; $i++) {
-                    $newPath = "$PropertyPath.$i"
-
-                    if ($i -lt $Object1.Count -and $i -lt $Object2.Count) {
-                        Compare-ObjectsRecursively -Object1 $Object1[$i] -Object2 $Object2[$i] -PropertyPath $newPath -Depth ($Depth + 1) -MaxDepth $MaxDepth
-                    } elseif ($i -lt $Object1.Count) {
+                # Check if this array should be compared as an unordered set
+                if (ShouldCompareAsUnorderedSet -PropertyPath $PropertyPath) {
+                    # For unordered sets, compare contents regardless of order
+                    if ($Object1.Count -ne $Object2.Count) {
+                        # Different lengths - report the difference
                         $result.Add([PSCustomObject]@{
-                                Property      = $newPath
-                                ExpectedValue = $Object1[$i]
-                                ReceivedValue = ''
+                                Property      = $PropertyPath
+                                ExpectedValue = "Array with $($Object1.Count) items"
+                                ReceivedValue = "Array with $($Object2.Count) items"
                             })
                     } else {
-                        $result.Add([PSCustomObject]@{
-                                Property      = $newPath
-                                ExpectedValue = ''
-                                ReceivedValue = $Object2[$i]
-                            })
+                        # Same length - check if all items exist in both arrays
+                        $array1Sorted = @($Object1 | Sort-Object)
+                        $array2Sorted = @($Object2 | Sort-Object)
+
+                        for ($i = 0; $i -lt $array1Sorted.Count; $i++) {
+                            $item1 = $array1Sorted[$i]
+                            $item2 = $array2Sorted[$i]
+
+                            # For primitive types, direct comparison
+                            if ($item1 -is [string] -or $item1 -is [int] -or $item1 -is [long] -or $item1 -is [bool] -or $item1 -is [double] -or $item1 -is [decimal]) {
+                                if ($item1 -ne $item2) {
+                                    # Items don't match even after sorting - arrays have different contents
+                                    $result.Add([PSCustomObject]@{
+                                            Property      = $PropertyPath
+                                            ExpectedValue = ($Object1 -join ', ')
+                                            ReceivedValue = ($Object2 -join ', ')
+                                        })
+                                    break
+                                }
+                            } else {
+                                # For complex objects, recursively compare with a generic path
+                                $newPath = "$PropertyPath[$i]"
+                                Compare-ObjectsRecursively -Object1 $item1 -Object2 $item2 -PropertyPath $newPath -Depth ($Depth + 1) -MaxDepth $MaxDepth
+                            }
+                        }
+                    }
+                } else {
+                    # Ordered array comparison (original behavior)
+                    $maxLength = [Math]::Max($Object1.Count, $Object2.Count)
+
+                    for ($i = 0; $i -lt $maxLength; $i++) {
+                        $newPath = "$PropertyPath.$i"
+
+                        if ($i -lt $Object1.Count -and $i -lt $Object2.Count) {
+                            Compare-ObjectsRecursively -Object1 $Object1[$i] -Object2 $Object2[$i] -PropertyPath $newPath -Depth ($Depth + 1) -MaxDepth $MaxDepth
+                        } elseif ($i -lt $Object1.Count) {
+                            $result.Add([PSCustomObject]@{
+                                    Property      = $newPath
+                                    ExpectedValue = $Object1[$i]
+                                    ReceivedValue = ''
+                                })
+                        } else {
+                            $result.Add([PSCustomObject]@{
+                                    Property      = $newPath
+                                    ExpectedValue = ''
+                                    ReceivedValue = $Object2[$i]
+                                })
+                        }
                     }
                 }
             } elseif ($Object1 -is [PSCustomObject] -or $Object1.PSObject.Properties.Count -gt 0) {
@@ -166,7 +237,7 @@ function Compare-CIPPIntuneObject {
                 if ($isObj1Array -or $isObj2Array) {
                     return
                 }
-                
+
                 # Safely get property names - ensure objects are not arrays before accessing PSObject.Properties
                 $allPropertyNames = @()
                 try {
@@ -202,7 +273,7 @@ function Compare-CIPPIntuneObject {
                     if ($prop1Exists -and $prop2Exists) {
                         try {
                             # Double-check arrays before accessing properties
-                            if (($Object1 -is [Array] -or $Object1 -is [System.Collections.IList]) -or 
+                            if (($Object1 -is [Array] -or $Object1 -is [System.Collections.IList]) -or
                                 ($Object2 -is [Array] -or $Object2 -is [System.Collections.IList])) {
                                 continue
                             }
@@ -297,7 +368,7 @@ function Compare-CIPPIntuneObject {
                             foreach ($groupValue in $child.groupSettingCollectionValue) {
                                 if ($groupValue.children) {
                                     $nestedResults = Process-GroupSettingChildren -Children $groupValue.children -Source $Source -IntuneCollection $IntuneCollection
-                                    $results.AddRange($nestedResults)
+                                    foreach ($nr in $nestedResults) { $results.Add($nr) }
                                 }
                             }
                         }
@@ -316,11 +387,11 @@ function Compare-CIPPIntuneObject {
                         }
 
                         $results.Add([PSCustomObject]@{
-                            Key    = "GroupChild-$($child.settingDefinitionId)"
-                            Label  = $childLabel
-                            Value  = $childValue
-                            Source = $Source
-                        })
+                                Key    = "GroupChild-$($child.settingDefinitionId)"
+                                Label  = $childLabel
+                                Value  = $childValue
+                                Source = $Source
+                            })
                     }
                     '#microsoft.graph.deviceManagementConfigurationSimpleSettingInstance' {
                         $childValue = $null
@@ -329,11 +400,11 @@ function Compare-CIPPIntuneObject {
                         }
 
                         $results.Add([PSCustomObject]@{
-                            Key    = "GroupChild-$($child.settingDefinitionId)"
-                            Label  = $childLabel
-                            Value  = $childValue
-                            Source = $Source
-                        })
+                                Key    = "GroupChild-$($child.settingDefinitionId)"
+                                Label  = $childLabel
+                                Value  = $childValue
+                                Source = $Source
+                            })
                     }
                     '#microsoft.graph.deviceManagementConfigurationChoiceSettingCollectionInstance' {
                         if ($child.choiceSettingCollectionValue) {
@@ -352,11 +423,11 @@ function Compare-CIPPIntuneObject {
                             $childValue = $values -join ', '
 
                             $results.Add([PSCustomObject]@{
-                                Key    = "GroupChild-$($child.settingDefinitionId)"
-                                Label  = $childLabel
-                                Value  = $childValue
-                                Source = $Source
-                            })
+                                    Key    = "GroupChild-$($child.settingDefinitionId)"
+                                    Label  = $childLabel
+                                    Value  = $childValue
+                                    Source = $Source
+                                })
                         }
                     }
                     '#microsoft.graph.deviceManagementConfigurationSimpleSettingCollectionInstance' {
@@ -368,11 +439,11 @@ function Compare-CIPPIntuneObject {
                             $childValue = $values -join ', '
 
                             $results.Add([PSCustomObject]@{
-                                Key    = "GroupChild-$($child.settingDefinitionId)"
-                                Label  = $childLabel
-                                Value  = $childValue
-                                Source = $Source
-                            })
+                                    Key    = "GroupChild-$($child.settingDefinitionId)"
+                                    Label  = $childLabel
+                                    Value  = $childValue
+                                    Source = $Source
+                                })
                         }
                     }
                     default {
@@ -383,7 +454,7 @@ function Compare-CIPPIntuneObject {
                 # Also process any children within choice setting values
                 if ($child.choiceSettingValue?.children) {
                     $nestedResults = Process-GroupSettingChildren -Children $child.choiceSettingValue.children -Source $Source -IntuneCollection $IntuneCollection
-                    $results.AddRange($nestedResults)
+                    foreach ($nr in $nestedResults) { $results.Add($nr) }
                 }
             }
 
@@ -401,7 +472,7 @@ function Compare-CIPPIntuneObject {
                         foreach ($groupValue in $settingInstance.groupSettingCollectionValue) {
                             if ($groupValue.children -is [System.Array]) {
                                 $childResults = Process-GroupSettingChildren -Children $groupValue.children -Source 'Reference' -IntuneCollection $intuneCollection
-                                $groupResults.AddRange($childResults)
+                                foreach ($cr in $childResults) { $groupResults.Add($cr) }
                             }
                         }
                         # Return the results from the recursive processing
@@ -473,7 +544,7 @@ function Compare-CIPPIntuneObject {
                         foreach ($groupValue in $settingInstance.groupSettingCollectionValue) {
                             if ($groupValue.children -is [System.Array]) {
                                 $childResults = Process-GroupSettingChildren -Children $groupValue.children -Source 'Difference' -IntuneCollection $intuneCollection
-                                $groupResults.AddRange($childResults)
+                                foreach ($cr in $childResults) { $groupResults.Add($cr) }
                             }
                         }
                         # Return the results from the recursive processing
